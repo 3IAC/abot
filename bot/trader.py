@@ -42,7 +42,7 @@ def run_scan():
 
             print(f"[ABOT] {symbol}: {signal['action'].upper()} ({signal['confidence']:.0%}) — {signal['key_signal']}")
 
-            if signal["action"] == "buy" and symbol not in open_symbols and signal["confidence"] >= 0.60:
+            if signal["action"] == "buy" and symbol not in open_symbols and signal["confidence"] >= 0.50:
                 price = indicators["price"]
                 max_dollars = portfolio_value * MAX_POSITION_PCT
                 qty = max(1, int(max_dollars / price))
