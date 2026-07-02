@@ -1,18 +1,20 @@
+from datetime import datetime, timezone, timedelta
 import bot.database as db
 import bot.alpaca_client as alpaca
 from bot.brain import analyze_signal, learn_from_trades
 from bot.indicators import get_all_indicators
 from bot.config import (
     SYMBOLS, CRYPTO_SYMBOLS, MAX_POSITION_PCT, MAX_OPEN_POSITIONS,
-    STOP_LOSS_PCT, TAKE_PROFIT_PCT, DEFAULT_CONFIDENCE_THRESHOLD
+    STOP_LOSS_PCT, TAKE_PROFIT_PCT, DEFAULT_CONFIDENCE_THRESHOLD,
+    MAX_TRADE_DURATION_MINUTES
 )
+
+_MAX_AGE = timedelta(minutes=MAX_TRADE_DURATION_MINUTES)
 
 
 def _scan_symbol(symbol, is_crypto_symbol, open_symbols, portfolio_value, recent_trades):
-    """Scan one symbol and place a trade if signal qualifies. Returns True if trade placed."""
-    timeframe = "5Min"
-    limit = 100
-    bars = alpaca.get_bars(symbol, timeframe=timeframe, limit=limit)
+    """Scan one symbol on 1Min bars and place a trade if signal qualifies."""
+    bars = alpaca.get_bars(symbol, timeframe="1Min", limit=100)
     if not bars or len(bars) < 20:
         print(f"[ABOT] {symbol}: insufficient bar data ({len(bars) if bars else 0} bars)")
         return False
@@ -23,9 +25,11 @@ def _scan_symbol(symbol, is_crypto_symbol, open_symbols, portfolio_value, recent
 
     symbol_trades = [t for t in recent_trades if t["symbol"] == symbol]
     signal = analyze_signal(symbol, indicators, symbol_trades)
-
-    # Get adaptive threshold — raises/lowers based on recent win rate for this symbol
     threshold = db.get_adaptive_threshold(symbol, default=DEFAULT_CONFIDENCE_THRESHOLD)
+
+    # Always log signal so dashboard populates
+    db.log_signal(symbol, signal["action"], signal["confidence"],
+                  signal["reasoning"], indicators)
 
     print(f"[ABOT] {symbol}: {signal['action'].upper()} ({signal['confidence']:.0%}) "
           f"threshold={threshold:.0%} — {signal['key_signal']}")
@@ -35,7 +39,7 @@ def _scan_symbol(symbol, is_crypto_symbol, open_symbols, portfolio_value, recent
         max_dollars = portfolio_value * MAX_POSITION_PCT
 
         if is_crypto_symbol:
-            qty = round(max_dollars / price, 6)  # fractional crypto
+            qty = round(max_dollars / price, 6)
         else:
             qty = max(1, int(max_dollars / price))
 
@@ -99,22 +103,42 @@ def run_scan():
 
 def check_open_trades():
     """
-    Exit monitor: check each open trade in DB against current Alpaca position.
-    If Alpaca closed a position (hit TP/SL), update our DB record and log learning.
+    Exit monitor: close trades that hit TP/SL or exceeded MAX_TRADE_DURATION_MINUTES.
+    Also closes any positions that Alpaca closed via bracket orders.
     """
     open_db_trades = db.get_open_trades()
     if not open_db_trades:
         return
 
     alpaca_positions = {p["symbol"]: p for p in alpaca.get_positions()}
+    now = datetime.now(timezone.utc)
 
     for trade in open_db_trades:
         symbol = trade["symbol"]
-        # Normalize symbol: Alpaca returns BTCUSD not BTC/USD in positions
         alpaca_sym = symbol.replace("/", "")
 
+        # Force-close if trade exceeded max duration
+        opened_at = trade.get("opened_at")
+        if opened_at:
+            try:
+                opened_dt = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+                age_min = int((now - opened_dt).total_seconds() // 60)
+                if (now - opened_dt) > _MAX_AGE:
+                    print(f"[ABOT] TIMEOUT {symbol} open {age_min}min — force closing")
+                    alpaca.close_position(symbol)
+                    price = alpaca.get_latest_price(symbol)
+                    if price:
+                        db.close_trade(trade["id"], price)
+                        pnl_pct = (price - trade["entry_price"]) / trade["entry_price"] * 100
+                        outcome = "WIN" if price > trade["entry_price"] else "LOSS"
+                        print(f"[ABOT] TIMEOUT {outcome} {symbol} | {pnl_pct:+.2f}%")
+                        _log_learning(symbol, trade, price, pnl_pct)
+                    continue
+            except Exception as e:
+                db.log_error("check_open.timeout", str(e))
+
+        # Check if Alpaca closed the position (TP/SL hit)
         if alpaca_sym not in alpaca_positions and symbol not in alpaca_positions:
-            # Position no longer exists in Alpaca — it was closed (TP or SL hit)
             price = alpaca.get_latest_price(symbol)
             if price:
                 db.close_trade(trade["id"], price)
@@ -134,7 +158,7 @@ def _log_learning(symbol, trade, exit_price, pnl_pct):
     wins = sum(1 for t in closed_trades if t.get("pnl", 0) and t["pnl"] > 0)
     total = len(closed_trades)
     win_rate = wins / total if total else 0
-    new_threshold = db.get_adaptive_threshold(symbol)
+    new_threshold = db.get_adaptive_threshold(symbol, DEFAULT_CONFIDENCE_THRESHOLD)
 
     outcome = "WIN" if pnl_pct > 0 else "LOSS"
     detail = (f"win_rate={win_rate:.1%} over last {total} trades | "

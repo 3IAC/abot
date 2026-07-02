@@ -18,7 +18,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 import bot.database as db
 import bot.alpaca_client as alpaca
 from bot.trader import run_scan, run_learn, check_open_trades
-from bot.config import SCAN_INTERVAL_MINUTES, LEARN_INTERVAL_HOURS, DASHBOARD_PORT
+from bot.config import SCAN_INTERVAL_MINUTES, LEARN_INTERVAL_HOURS, DASHBOARD_PORT, MAX_TRADE_DURATION_MINUTES
 
 _shutdown = threading.Event()
 _market_was_open = False  # tracks last known market state for open-watcher
@@ -48,6 +48,35 @@ def _market_open_watcher():
         pass
 
 
+def _close_stale_positions():
+    """On startup: close any DB-tracked positions open longer than MAX_TRADE_DURATION_MINUTES."""
+    from datetime import datetime, timezone, timedelta
+    from bot.trader import _log_learning
+    open_trades = db.get_open_trades()
+    if not open_trades:
+        return
+    max_age = timedelta(minutes=MAX_TRADE_DURATION_MINUTES)
+    now = datetime.now(timezone.utc)
+    for trade in open_trades:
+        opened_at = trade.get("opened_at")
+        if not opened_at:
+            continue
+        try:
+            opened_dt = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+            if (now - opened_dt) > max_age:
+                sym = trade["symbol"]
+                age_min = int((now - opened_dt).total_seconds() // 60)
+                print(f"[ABOT] STARTUP CLOSE: {sym} open {age_min}min (>{MAX_TRADE_DURATION_MINUTES}min limit)")
+                alpaca.close_position(sym)
+                price = alpaca.get_latest_price(sym)
+                if price:
+                    db.close_trade(trade["id"], price)
+                    pnl_pct = (price - trade["entry_price"]) / trade["entry_price"] * 100
+                    _log_learning(sym, trade, price, pnl_pct)
+        except Exception as e:
+            db.log_error("startup.close_stale", str(e))
+
+
 def main():
     print("""
 ╬══════════════════════════════════════════════════════════╬
@@ -56,6 +85,7 @@ def main():
 ╙══════════════════════════════════════════════════════════╜
 """)
     db.init_db()
+    _close_stale_positions()
     print(f"[ABOT] Scan interval: every {SCAN_INTERVAL_MINUTES} minutes")
     print(f"[ABOT] Learning cycle: every {LEARN_INTERVAL_HOURS} hours")
 
