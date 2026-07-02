@@ -16,10 +16,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 
 import bot.database as db
+import bot.alpaca_client as alpaca
 from bot.trader import run_scan, run_learn
 from bot.config import SCAN_INTERVAL_MINUTES, LEARN_INTERVAL_HOURS, DASHBOARD_PORT
 
 _shutdown = threading.Event()
+_market_was_open = False  # tracks last known market state for open-watcher
 
 def start_dashboard():
     try:
@@ -29,6 +31,22 @@ def start_dashboard():
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except Exception as e:
         db.log_error("main.dashboard", str(e))
+
+def _market_open_watcher():
+    """Fire an immediate scan the moment market transitions from closed to open."""
+    global _market_was_open
+    try:
+        clock = alpaca.get_clock()
+        if not clock:
+            return
+        is_open = clock.get("is_open", False)
+        if is_open and not _market_was_open:
+            print("[ABOT] Market just opened — firing immediate scan")
+            run_scan()
+        _market_was_open = is_open
+    except Exception:
+        pass
+
 
 def main():
     print("""
@@ -48,6 +66,7 @@ def main():
     scheduler.add_job(run_scan, "interval", minutes=SCAN_INTERVAL_MINUTES,
                       id="scanner", next_run_time=datetime.now(timezone.utc))
     scheduler.add_job(run_learn, "interval", hours=LEARN_INTERVAL_HOURS, id="learner")
+    scheduler.add_job(_market_open_watcher, "interval", seconds=30, id="open_watcher")
     scheduler.start()
 
     dash_thread = threading.Thread(target=start_dashboard, daemon=True)
