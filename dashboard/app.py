@@ -86,6 +86,10 @@ def api_clock():
     clock = alpaca.get_clock()
     return jsonify(clock or {"is_open": False})
 
+@app.route("/api/performance")
+def api_performance():
+    return jsonify(db.get_performance())
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

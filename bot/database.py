@@ -183,6 +183,43 @@ def get_adaptive_threshold(symbol, default=0.35):
         return min(0.60, default + 0.05)
     return default
 
+def get_performance():
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    today  = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()[:10]
+    week   = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()[:10]
+    month  = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()[:10]
+    with get_conn() as conn:
+        closed = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE status='closed' AND pnl IS NOT NULL"
+        ).fetchall()]
+    empty = {'today_pnl':0,'today_trades':0,'week_pnl':0,'week_trades':0,
+             'month_pnl':0,'month_trades':0,'alltime_pnl':0,'alltime_trades':0,
+             'avg_win':0,'avg_loss':0,'best_trade':None,'worst_trade':None,
+             'win_rate':0,'wins':0,'losses':0,'total':0}
+    if not closed:
+        return empty
+    def _pnl(s): return round(sum(t.get('pnl',0) or 0 for t in closed if (t.get('closed_at') or '') >= s), 2)
+    def _cnt(s): return sum(1 for t in closed if (t.get('closed_at') or '') >= s)
+    wins   = [t for t in closed if (t.get('pnl') or 0) > 0]
+    losses = [t for t in closed if (t.get('pnl') or 0) <= 0]
+    best   = max(closed, key=lambda t: t.get('pnl') or 0)
+    worst  = min(closed, key=lambda t: t.get('pnl') or 0)
+    return {
+        'today_pnl': _pnl(today),   'today_trades': _cnt(today),
+        'week_pnl':  _pnl(week),    'week_trades':  _cnt(week),
+        'month_pnl': _pnl(month),   'month_trades': _cnt(month),
+        'alltime_pnl': round(sum(t.get('pnl',0) or 0 for t in closed), 2),
+        'alltime_trades': len(closed),
+        'avg_win':  round(sum(t.get('pnl',0) for t in wins)   / len(wins),   2) if wins   else 0,
+        'avg_loss': round(sum(t.get('pnl',0) for t in losses) / len(losses), 2) if losses else 0,
+        'best_trade':  {'symbol': best.get('symbol'),  'pnl': best.get('pnl'),  'pnl_pct': best.get('pnl_pct')}  if best  else None,
+        'worst_trade': {'symbol': worst.get('symbol'), 'pnl': worst.get('pnl'), 'pnl_pct': worst.get('pnl_pct')} if worst else None,
+        'win_rate': round(len(wins)/len(closed)*100, 1),
+        'wins': len(wins), 'losses': len(losses), 'total': len(closed),
+    }
+
+
 def log_learning_event(symbol, event_type, detail):
     """Log a learning event (confidence adjustment, pattern detected, etc.)."""
     with get_conn() as conn:
