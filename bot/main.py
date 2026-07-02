@@ -49,32 +49,51 @@ def _market_open_watcher():
 
 
 def _close_stale_positions():
-    """On startup: close any DB-tracked positions open longer than MAX_TRADE_DURATION_MINUTES."""
+    """
+    On startup: close ALL open Alpaca positions immediately.
+    BTC/ETH may be orphans (opened before DB tracking) — close them regardless.
+    Also close any DB-tracked open trades that are too old.
+    """
     from datetime import datetime, timezone, timedelta
     from bot.trader import _log_learning
-    open_trades = db.get_open_trades()
-    if not open_trades:
-        return
-    max_age = timedelta(minutes=MAX_TRADE_DURATION_MINUTES)
-    now = datetime.now(timezone.utc)
-    for trade in open_trades:
-        opened_at = trade.get("opened_at")
-        if not opened_at:
-            continue
+
+    # ── Close all live Alpaca positions (orphans + tracked) ──────────
+    live_positions = alpaca.get_positions()
+    if live_positions:
+        print(f"[ABOT] STARTUP: found {len(live_positions)} open Alpaca position(s) — closing all")
+        for pos in live_positions:
+            sym = pos.get("symbol", "")
+            # Convert BTCUSD → BTC/USD for our close helper
+            canonical = sym
+            if sym == "BTCUSD":
+                canonical = "BTC/USD"
+            elif sym == "ETHUSD":
+                canonical = "ETH/USD"
+            try:
+                ok = alpaca.close_position(canonical)
+                price = float(pos.get("current_price") or pos.get("avg_entry_price") or 0)
+                entry = float(pos.get("avg_entry_price") or 0)
+                pnl_pct = (price - entry) / entry * 100 if entry else 0
+                outcome = "WIN" if pnl_pct > 0 else "LOSS"
+                print(f"[ABOT] STARTUP CLOSE {sym} ok={ok} | entry={entry:.2f} current={price:.2f} | {pnl_pct:+.2f}% {outcome}")
+            except Exception as e:
+                db.log_error("startup.close_live", str(e))
+
+    # ── Also mark any lingering DB open trades as closed ─────────────
+    open_db = db.get_open_trades()
+    for trade in open_db:
         try:
-            opened_dt = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
-            if (now - opened_dt) > max_age:
-                sym = trade["symbol"]
-                age_min = int((now - opened_dt).total_seconds() // 60)
-                print(f"[ABOT] STARTUP CLOSE: {sym} open {age_min}min (>{MAX_TRADE_DURATION_MINUTES}min limit)")
-                alpaca.close_position(sym)
-                price = alpaca.get_latest_price(sym)
-                if price:
-                    db.close_trade(trade["id"], price)
-                    pnl_pct = (price - trade["entry_price"]) / trade["entry_price"] * 100
-                    _log_learning(sym, trade, price, pnl_pct)
+            sym = trade["symbol"]
+            price = alpaca.get_latest_price(sym)
+            if price:
+                db.close_trade(trade["id"], price)
+                entry = trade["entry_price"]
+                pnl_pct = (price - entry) / entry * 100
+                outcome = "WIN" if pnl_pct > 0 else "LOSS"
+                print(f"[ABOT] STARTUP DB-CLOSE {sym} {outcome} | {pnl_pct:+.2f}%")
+                _log_learning(sym, trade, price, pnl_pct)
         except Exception as e:
-            db.log_error("startup.close_stale", str(e))
+            db.log_error("startup.close_db", str(e))
 
 
 def main():
