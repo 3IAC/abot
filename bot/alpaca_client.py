@@ -52,7 +52,9 @@ def place_order(symbol, qty, side, order_type="market", stop_loss=None, take_pro
         "type": order_type,
         "time_in_force": tif
     }
-    if stop_loss or take_profit:
+    # Alpaca crypto does not support bracket orders — use simple market order
+    # SL/TP are tracked in DB and managed by the exit monitor
+    if not is_crypto(symbol) and (stop_loss or take_profit):
         body["order_class"] = "bracket"
         if stop_loss:
             body["stop_loss"] = {"stop_price": str(round(stop_loss, 4))}
