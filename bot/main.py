@@ -17,7 +17,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 
 import bot.database as db
 import bot.alpaca_client as alpaca
-from bot.trader import run_scan, run_learn
+from bot.trader import run_scan, run_learn, check_open_trades
 from bot.config import SCAN_INTERVAL_MINUTES, LEARN_INTERVAL_HOURS, DASHBOARD_PORT
 
 _shutdown = threading.Event()
@@ -66,6 +66,7 @@ def main():
     scheduler.add_job(run_scan, "interval", minutes=SCAN_INTERVAL_MINUTES,
                       id="scanner", next_run_time=datetime.now(timezone.utc))
     scheduler.add_job(run_learn, "interval", hours=LEARN_INTERVAL_HOURS, id="learner")
+    scheduler.add_job(check_open_trades, "interval", minutes=2, id="exit_monitor")
     scheduler.add_job(_market_open_watcher, "interval", seconds=30, id="open_watcher")
     scheduler.start()
 

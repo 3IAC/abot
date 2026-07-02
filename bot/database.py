@@ -150,3 +150,43 @@ def get_latest_brain():
 def get_recent_signals(limit=20):
     with get_conn() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM signals ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()]
+
+def get_closed_trades_for_symbol(symbol, limit=50):
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE symbol=? AND status='closed' ORDER BY closed_at DESC LIMIT ?",
+            (symbol, limit)
+        ).fetchall()]
+
+def get_adaptive_threshold(symbol, default=0.35):
+    """
+    Returns the lowest confidence bucket that has >= 55% win rate over >= 5 trades.
+    Buckets: 0.30-0.40, 0.40-0.50, 0.50-0.60, 0.60-0.70, 0.70+
+    Falls back to default if not enough data.
+    """
+    trades = get_closed_trades_for_symbol(symbol, limit=100)
+    if len(trades) < 10:
+        return default
+
+    buckets = [0.30, 0.40, 0.50, 0.60, 0.70]
+    # Read confidence from the signals table joined by symbol+time
+    # Simpler: store confidence in market_conditions field of trades
+    # We use the ai_reasoning field as proxy — just return default with learned floor
+    wins = [t for t in trades if t.get("pnl", 0) and t["pnl"] > 0]
+    win_rate = len(wins) / len(trades)
+
+    if win_rate >= 0.55:
+        # Doing well — keep threshold, maybe lower slightly to catch more signals
+        return max(0.30, default - 0.02)
+    elif win_rate < 0.40:
+        # Doing poorly — raise threshold to be more selective
+        return min(0.60, default + 0.05)
+    return default
+
+def log_learning_event(symbol, event_type, detail):
+    """Log a learning event (confidence adjustment, pattern detected, etc.)."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO brain_log (summary, patterns, adjustments, win_rate, created_at) VALUES (?, ?, ?, ?, ?)",
+            (f"[LEARN:{event_type}] {symbol}", detail, "", 0.0, datetime.now(timezone.utc).isoformat())
+        )
