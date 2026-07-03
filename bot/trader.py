@@ -33,25 +33,36 @@ def _scan_symbol(symbol, is_crypto_symbol, open_symbols, portfolio_value, recent
     print(f"[ABOT] {symbol}: {action.upper()} ({conf:.0%}) "
           f"threshold={threshold:.0%} — {signal['key_signal']}")
 
-    if action == "buy" and symbol not in open_symbols and conf >= threshold:
-        price = indicators["price"]
-        max_dollars = portfolio_value * MAX_POSITION_PCT
-        qty = round(max_dollars / price, 6) if is_crypto_symbol else max(1, int(max_dollars / price))
-        stop_loss = round(price * (1 - STOP_LOSS_PCT), 4)
+    if action not in ("buy", "sell") or conf < threshold or symbol in open_symbols:
+        return False
+
+    price = indicators["price"]
+    max_dollars = portfolio_value * MAX_POSITION_PCT
+    qty = round(max_dollars / price, 6) if is_crypto_symbol else max(1, int(max_dollars / price))
+
+    if action == "buy":
+        stop_loss   = round(price * (1 - STOP_LOSS_PCT), 4)
         take_profit = round(price * (1 + TAKE_PROFIT_PCT), 4)
+    else:  # sell / short
+        stop_loss   = round(price * (1 + STOP_LOSS_PCT), 4)   # above entry for short
+        take_profit = round(price * (1 - TAKE_PROFIT_PCT), 4) # below entry for short
+        if is_crypto_symbol:
+            # Alpaca paper does not support crypto short selling
+            print(f"[ABOT] {symbol}: SELL signal {conf:.0%} — skipping (no crypto shorts on paper)")
+            return False
 
-        print(f"[ABOT] Placing BUY {qty} {symbol} @ ${price} SL=${stop_loss} TP=${take_profit}")
-        order = alpaca.place_order(symbol, qty, "buy", stop_loss=stop_loss, take_profit=take_profit)
-        print(f"[ABOT] ORDER RESPONSE: {json.dumps(order)[:400] if order else 'None/Error'}")
+    label = "BUY" if action == "buy" else "SHORT"
+    print(f"[ABOT] Placing {label} {qty} {symbol} @ ${price} SL=${stop_loss} TP=${take_profit}")
+    order = alpaca.place_order(symbol, qty, action, stop_loss=stop_loss, take_profit=take_profit)
+    print(f"[ABOT] ORDER RESPONSE: {json.dumps(order)[:400] if order else 'None/Error'}")
 
-        if order:
-            db.log_trade(symbol, "buy", qty, price, "ai_signal",
-                         indicators, signal["reasoning"], stop_loss, take_profit)
-            print(f"[ABOT] {'CRYPTO' if is_crypto_symbol else 'STOCK'} BUY placed: "
-                  f"{qty} {symbol} @ ${price}")
-            return True
-        else:
-            print(f"[ABOT] {symbol}: order FAILED — check errors table")
+    if order:
+        db.log_trade(symbol, action, qty, price, "ai_signal",
+                     indicators, signal["reasoning"], stop_loss, take_profit)
+        print(f"[ABOT] {'CRYPTO' if is_crypto_symbol else 'STOCK'} {label} placed: {qty} {symbol} @ ${price}")
+        return True
+    else:
+        print(f"[ABOT] {symbol}: {label} order FAILED — check errors table")
     return False
 
 
@@ -127,7 +138,8 @@ def check_open_trades():
                     if price:
                         db.close_trade(trade["id"], price)
                         entry = trade["entry_price"]
-                        pnl_pct = (price - entry) / entry * 100
+                        side = trade.get("side", "buy")
+                        pnl_pct = (price - entry) / entry * 100 * (1 if side == "buy" else -1)
                         outcome = "WIN" if pnl_pct > 0 else "LOSS"
                         print(f"[ABOT] TIMEOUT {outcome} {symbol} | entry={entry:.4f} exit={price:.4f} | {pnl_pct:+.2f}%")
                         _log_learning(symbol, trade, price, pnl_pct)
@@ -141,7 +153,8 @@ def check_open_trades():
             if price:
                 db.close_trade(trade["id"], price)
                 entry = trade["entry_price"]
-                pnl_pct = (price - entry) / entry * 100
+                side = trade.get("side", "buy")
+                pnl_pct = (price - entry) / entry * 100 * (1 if side == "buy" else -1)
                 outcome = "WIN" if pnl_pct > 0 else "LOSS"
                 print(f"[ABOT] {outcome} {symbol} closed by Alpaca | "
                       f"entry=${entry:.4f} exit=${price:.4f} | {pnl_pct:+.2f}%")
